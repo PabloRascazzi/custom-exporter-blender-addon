@@ -6,9 +6,9 @@ bl_info = {
     "name": "Model Exporter Add-on",
     "description": "Exports model data with vertices and indices in a proper format for OpenGL.",
     "author": "Pablo Rascazzi",
-    "version": (0, 3),
+    "version": (0, 4),
     "blender": (2, 92, 0),
-    "location": "File > Export > Model Exporter (.mdl)",
+    "location": "File > Export > Model Exporter (.model)",
     "category": "Import-Export"
 }
 
@@ -192,10 +192,10 @@ class ExportModel(Operator, ExportHelper):
     bl_label = "Export Model"
 
     # ExportHelper mixin class uses this
-    filename_ext = ".mdl"
+    filename_ext = ".model"
 
     filter_glob: StringProperty(
-        default="*.mdl",
+        default="*.model",
         options={'HIDDEN'},
         maxlen=255,  # Max internal buffer length, longer would be clamped.
     )
@@ -245,7 +245,7 @@ class ExportModel(Operator, ExportHelper):
 
 # Only needed if you want to add into a dynamic menu
 def menu_func_export(self, context):
-    self.layout.operator(ExportModel.bl_idname, text="Model Exporter (.mdl)")
+    self.layout.operator(ExportModel.bl_idname, text="Model Exporter (.model)")
 
 
 def register():
