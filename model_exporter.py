@@ -6,7 +6,7 @@ bl_info = {
     "name": "Model Exporter Add-on",
     "description": "Exports model data with vertices and indices in a proper format for OpenGL.",
     "author": "Pablo Rascazzi",
-    "version": (0, 2),
+    "version": (0, 3),
     "blender": (2, 92, 0),
     "location": "File > Export > Model Exporter (.mdl)",
     "category": "Import-Export"
@@ -41,8 +41,8 @@ def process_model_data(object, model_type, logging):
         for li in face.loop_indices:
             vert = []
             vert.append(mesh.vertices[loop[li].vertex_index].co.x)
-            vert.append(mesh.vertices[loop[li].vertex_index].co.y)
             vert.append(mesh.vertices[loop[li].vertex_index].co.z)
+            vert.append(-mesh.vertices[loop[li].vertex_index].co.y)
             if vertices_stride >= 5:
                 vert.append(uv_layer[li].uv.x)
                 vert.append(uv_layer[li].uv.y)
