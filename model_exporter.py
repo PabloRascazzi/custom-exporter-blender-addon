@@ -7,7 +7,7 @@ bl_info = {
     "name": "Model Exporter Add-on",
     "description": "Exports model data with vertices and indices in a proper format for OpenGL.",
     "author": "Pablo Rascazzi",
-    "version": (0, 5),
+    "version": (0, 6),
     "blender": (2, 92, 0),
     "location": "File > Export > Model Exporter (.model)",
     "category": "Import-Export"
@@ -86,6 +86,33 @@ class BoneInfo():
         print('             ', self.local_pose_transform[12:16])
 
 
+class BoneCurve():
+    def __init__(self):
+        self.index = None
+        self.name = None
+        self.location = [0,0,0]
+        self.scale = [0,0,0]
+        self.quaternion = [0,0,0,0]
+        
+    def log(self):
+        print(' > Bone Name: %s' % self.name)
+        print(' == > Bone Index: %d' % self.index)
+        print(' == > Location:   ', self.location)
+        print(' == > Scale:      ', self.scale)
+        print(' == > Quaternion: ', self.quaternion)
+    
+    
+class Animframe():
+    def __init__(self):
+        self.frame = None
+        self.bone_curves = []
+        
+    def log(self):
+        print(' > Frame: %s' % self.frame)
+        print(' > Bone Curves:')
+        for curve in self.bone_curves: curve.log()
+    
+
 def matrix_to_float16(matrix):
     float16 = []
     float16.extend([round(matrix[0][0], ra), round(matrix[0][1], ra), round(matrix[0][2], ra), round(matrix[0][3], ra)])
@@ -95,7 +122,7 @@ def matrix_to_float16(matrix):
     return float16
 
 
-def process_armature_data(armature, logging):
+def process_armature_data(armature, flip_axis, logging):
     if logging == True: print("Processing armature data...")   
     bones_dict = {} # dict of bones with bone names as key (bone.name == vertex_group.name)
     
@@ -124,7 +151,47 @@ def process_armature_data(armature, logging):
     return bones_dict
 
 
-def process_model_data(object, model_type, bones_dict, logging):
+def process_animation_data(armature, bones_dict, flip_axis, logging):
+    if logging == True: print("Processing animation data...")
+    action = armature.animation_data.action
+    
+    frame_range = [int(action.frame_range[0]), int(action.frame_range[1])]
+    frame_times = []
+    anim_frames = []
+
+    for marker in action.pose_markers: 
+        frame_times.append(marker.frame)
+        
+    for frame in frame_times:
+        new_frame = Animframe()
+        new_frame.frame = frame
+        
+        for group in action.groups:
+            new_curve = BoneCurve()
+            new_curve.name = group.name
+            new_curve.index = bones_dict[group.name].index
+            
+            for fcurve in group.channels:
+                if   fcurve.data_path.endswith('location'): 
+                    new_curve.location[fcurve.array_index] = round(fcurve.evaluate(frame), ra)
+                elif fcurve.data_path.endswith('scale'): 
+                    new_curve.scale[fcurve.array_index] = round(fcurve.evaluate(frame), ra)
+                elif fcurve.data_path.endswith('rotation_quaternion'):  
+                    new_curve.quaternion[3 if fcurve.array_index == 0 else fcurve.array_index-1] = round(fcurve.evaluate(frame), ra)
+            
+            new_frame.bone_curves.append(new_curve)
+        anim_frames.append(new_frame)
+            
+    if logging == True: 
+        print('Frame Range:', frame_range)
+        print('Frame Times:', frame_times)
+        print('Animation Frames:')
+        for anim_frame in anim_frames: anim_frame.log()
+        
+    return frame_range, anim_frames
+
+
+def process_model_data(object, model_type, bones_dict, flip_axis, logging):
     if logging == True: print("Processing model data...")
     
     # Initialize variables and data
@@ -156,17 +223,16 @@ def process_model_data(object, model_type, bones_dict, logging):
             vi = loop[li].vertex_index # vertex Index
             vert = []
             vert.append(round(mesh.vertices[vi].co.x, ra))
-            vert.append(round(mesh.vertices[vi].co.z, ra))
-            vert.append(round(-mesh.vertices[vi].co.y, ra))
+            vert.append(round(mesh.vertices[vi].co.z, ra)  if flip_axis == True else round(mesh.vertices[vi].co.y, ra))
+            vert.append(round(-mesh.vertices[vi].co.y, ra) if flip_axis == True else round(mesh.vertices[vi].co.z, ra))
             if 'uv' in model_type.name:
                 vert.append(round(uv_layer[li].uv.x, ra))
                 vert.append(round(uv_layer[li].uv.y, ra))
             if 'tbn' in model_type.name:
                 vert.append(round(loop[li].normal[0], ra))
-                vert.append(round(loop[li].normal[1], ra))
-                vert.append(round(loop[li].normal[2], ra))
-            if 'Rigged' in model_type.name:
-                # WORK IN PROGRESS              
+                vert.append(round(loop[li].normal[2], ra)  if flip_axis == True else round(loop[li].normal[1], ra))
+                vert.append(-round(loop[li].normal[1], ra) if flip_axis == True else round(loop[li].normal[2], ra))
+            if 'Rigged' in model_type.name:            
                 vb = [] # vertex bones
                 for group in mesh.vertices[vi].groups:
                     vb.append([bones_dict[vertex_group[group.group].name].index, group.weight])
@@ -285,6 +351,52 @@ def get_model_type(uv_bool, normals_bool, rigging_bool, logging):
     return type
 
 
+def write_to_animation_file(file_path, file_format, frame_range, anim_frames, logging):
+    file_path = file_path + ".anim"
+    if logging == True: print('File save location: %s' % file_path)
+    
+    if file_format == 'Binary':
+        if logging == True: print("Writing binary animation data to file...")
+        f = open(file_path, 'wb')
+        
+        f.write(bl_info['version'][0].to_bytes(4, sys.byteorder, signed=True))
+        f.write(bl_info['version'][1].to_bytes(4, sys.byteorder, signed=True))
+        f.write(frame_range[0].to_bytes(4, sys.byteorder, signed=True))
+        f.write(frame_range[1].to_bytes(4, sys.byteorder, signed=True))
+        f.write(len(anim_frames).to_bytes(4, sys.byteorder, signed=True))
+        f.write(len(anim_frames[0].bone_curves).to_bytes(4, sys.byteorder, signed=True))
+        for anim_frame in anim_frames:
+            f.write(anim_frame.frame.to_bytes(4, sys.byteorder, signed=True))
+            for bone_curve in anim_frame.bone_curves:
+                f.write(bone_curve.index.to_bytes(4, sys.byteorder, signed=True))
+                location_byte_array = numpy.array(bone_curve.location, 'float32')
+                location_byte_array.tofile(f)
+                scale_byte_array = numpy.array(bone_curve.scale, 'float32')
+                scale_byte_array.tofile(f)
+                quaternion_byte_array = numpy.array(bone_curve.quaternion, 'float32')
+                quaternion_byte_array.tofile(f)
+    
+        f.close()
+    elif file_format == 'ASCII':
+        if logging == True: print("Writing ASCII animation data to file...")
+        f = open(file_path, 'w')
+        
+        f.write('vers %d %d\n' % (bl_info['version'][0], bl_info['version'][1]))
+        f.write('frng %d %d\n' % (frame_range[0], frame_range[1]))
+        f.write('fcnt %d\n' % len(anim_frames))
+        f.write('bcnt %d\n' % len(anim_frames[0].bone_curves))
+        for anim_frame in anim_frames:
+            f.write('fnum %d\n' % anim_frame.frame)
+            for bone_curve in anim_frame.bone_curves:
+                f.write('indx %d\n' % bone_curve.index)
+                f.write('loct %f %f %f\n' % (bone_curve.location[0], bone_curve.location[1], bone_curve.location[2]))
+                f.write('scal %f %f %f\n' % (bone_curve.scale[0], bone_curve.scale[1], bone_curve.scale[2]))
+                f.write('quat %f %f %f %f\n' % (bone_curve.quaternion[0], bone_curve.quaternion[1], bone_curve.quaternion[2], bone_curve.quaternion[3]))
+        
+        f.close()
+    else: raise Error('Invalid file format.')
+    
+
 def write_to_armature_file(file_path, file_format, bones_dict, logging):
     file_path = file_path + ".armt"
     if logging == True: print('File save location: %s' % file_path)
@@ -375,7 +487,7 @@ def write_to_model_file(file_path, file_format, model, logging):
     else: raise Error('Invalid file format.')
 
 
-def export_model(context, file_path, file_ext, file_format, selection, uv_bool, normals_bool, rigging_bool, logging):
+def export_model(context, file_path, file_ext, file_format, selection, flip_axis, uv_bool, normals_bool, rigging_bool, armature_bool, anim_bool, logging):
     print('\EXPORTER STARTED')
     print('Exporter Version: %d.%d' % (bl_info['version'][0], bl_info['version'][1]))
     
@@ -384,15 +496,24 @@ def export_model(context, file_path, file_ext, file_format, selection, uv_bool, 
         object_list, armature_list = make_objects_list(selection, logging)
         model_type = get_model_type(uv_bool, normals_bool, rigging_bool, logging)
     
-        if rigging_bool == True:
+        # Process all Armature data for use in processing other data
+        if rigging_bool == True or armature_bool == True or anim_bool == True:
             armature_dict = {}
-            # Process all Armature data
             for armature in armature_list:
-                armature_dict[armature.name] = process_armature_data(armature.data, logging)
-            # Write all Armature data to file
+                armature_dict[armature.name] = process_armature_data(armature.data, flip_axis, logging)
+        
+        # Write all Armature data to file
+        if armature_bool == True:
             for key in armature_dict:
                 write_to_armature_file(file_path, file_format, armature_dict[key], logging)
             print('ARMATURE EXPORT FINISHED')
+        
+        # Process and export all Animation data
+        if anim_bool == True:
+            for armature in armature_list:
+                frame_range, anim_frames = process_animation_data(armature, armature_dict[armature.name], flip_axis, logging)
+                write_to_animation_file(file_path, file_format, frame_range, anim_frames, logging)
+            print('ANIMATION EXPORT FINISHED')
         
         for object in object_list:
             # Fetch Object's Armature data (aka. bones_dict) for current object
@@ -405,7 +526,7 @@ def export_model(context, file_path, file_ext, file_format, selection, uv_bool, 
                 if bones_dict == None: raise Error('Object "%s" missing armature.' % object.name)
             
             # Fetch and process Object's Model data
-            model = process_model_data(object, model_type, bones_dict, logging)
+            model = process_model_data(object, model_type, bones_dict, flip_axis, logging)
             if logging == True: model.log()
             
             # Modify file_path if necessary
@@ -414,8 +535,8 @@ def export_model(context, file_path, file_ext, file_format, selection, uv_bool, 
             # Write Model data to file
             write_to_model_file(filepath, file_format, model, logging)
             if logging == True: print('Finished exporting %s...' % object.name)
-            
         print('MODEL EXPORT FINISHED')
+        
     except Error as e: 
         print('Error:', e)
         
@@ -456,7 +577,6 @@ class ExportModel(Operator, ExportHelper):
         ),
         default='selected_children',
     )
-    
     format: EnumProperty(
         name="Format",
         description="Choose file format",
@@ -466,28 +586,55 @@ class ExportModel(Operator, ExportHelper):
         ),
         default='Binary',
     )
-    
+    axis_bool: BoolProperty(
+        name="Y-Axis as Up",
+        description="Flips the axis so that the Y-Axis is pointing up",
+        default=False,
+    )
     log_bool: BoolProperty(
         name="Log to console",
         description="Logs all data and calls to console",
         default=True,
     )
     
+    # Model Settings Properties
     uv_bool: BoolProperty(
         name="UVs",
         description="Writes UV data in vertex array",
-        default=False,
+        default=True,
     )
-    
     normals_bool: BoolProperty(
         name="Normals",
         description="Writes normal data in vertex array",
-        default=False,
+        default=True,
     )
-    
     rigging_bool: BoolProperty(
         name="Rigging",
-        description="Writes bone data in vertex array, and exports armature in .armt file",
+        description="Writes bone weight and inced in vertex array",
+        default=True,
+    ) 
+    
+    # Armature Settings
+    armature_bool: BoolProperty(
+        name="Armature",
+        description="Writes bone data in a hierarchy list and exports it in .armt file",
+        default=True,
+    ) 
+    
+    # Animation Settings
+    frames: EnumProperty(
+        name="Frames",
+        description="Choose frames to export",
+        items=(
+            ('action_pose_markers',  "Action Pose Markers",  "Export only frames marked with an ActionPoseMarker"),
+            ('keyframe_points', "All Keyframe Points", "Export all frames that have a Keyframe point"),
+            ('interval', "Specified Interval", "Export frames at the specified interval"),
+        ),
+        default='action_pose_markers',
+    )
+    anim_bool: BoolProperty(
+        name="Animation",
+        description="Writes animation data and exports it in .anim file",
         default=True,
     )   
     
@@ -499,15 +646,23 @@ class ExportModel(Operator, ExportHelper):
         layout.label(text='Export Settings:')
         layout.prop(self, 'selection')
         layout.prop(self, 'format')
+        layout.prop(self, 'axis_bool')
         layout.prop(self, 'log_bool')
         
-        layout.label(text='Include:')
+        layout.label(text='Model Settings:')
         layout.prop(self, 'uv_bool')
         layout.prop(self, 'normals_bool')
-        layout.prop(self, 'rigging_bool')  
+        layout.prop(self, 'rigging_bool')
+        
+        layout.label(text='Armature Settings:')
+        layout.prop(self, 'armature_bool')
+        
+        layout.label(text='Animation Settings:')
+        layout.prop(self, 'frames')
+        layout.prop(self, 'anim_bool')  
 
     def execute(self, context):
-        return export_model(context, self.filepath.replace(self.filename_ext, ''), self.filename_ext, self.format, self.selection, self.uv_bool, self.normals_bool, self.rigging_bool, self.log_bool)
+        return export_model(context, self.filepath.replace(self.filename_ext, ''), self.filename_ext, self.format, self.selection, self.axis_bool, self.uv_bool, self.normals_bool, self.rigging_bool, self.armature_bool, self.anim_bool, self.log_bool)
     
     
 # Only needed if you want to add into a dynamic menu
