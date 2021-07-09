@@ -24,4 +24,4 @@ To use the exporter,
 
 ## Additional Information
 
-Additional information can be found, per add-on versions, in the **README (Version *.*).txt file** in the **Documentation folder**.
+Additional information can be found, per add-on versions, in the **README (Version \*.\*).txt file** in the **Documentation folder**.
