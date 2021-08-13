@@ -10,7 +10,7 @@ bl_info = {
     "name": "OpenGL Exporter Add-on",
     "description": "Exports blender data in a more optimized format for OpenGL.",
     "author": "Pablo Rascazzi",
-    "version": (0, 7, 2),
+    "version": (0, 7, 3),
     "blender": (2, 92, 0),
     "location": "File > Export > OpenGL Exporter",
     "category": "Import-Export"
@@ -265,10 +265,9 @@ def process_animation_data(armature, bones_dict, flip_axis, export_frames, frame
             new_curve.index = bones_dict[pose_bone.name].index
             
             if pose_bone.parent == None:
-                pose_bone_matrix = pose_bone.matrix
+                pose_bone_matrix = conversion @ pose_bone.matrix if flip_axis else pose_bone.matrix
             else:
                 pose_bone_matrix = pose_bone.parent.matrix.inverted() @ pose_bone.matrix
-            
             pose_bone_location, pose_bone_quaternion, pose_bone_scale = pose_bone_matrix.decompose()
             
             new_curve.matrix = pose_bone_matrix
