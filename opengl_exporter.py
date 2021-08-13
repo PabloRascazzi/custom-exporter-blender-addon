@@ -10,7 +10,7 @@ bl_info = {
     "name": "OpenGL Exporter Add-on",
     "description": "Exports blender data in a more optimized format for OpenGL.",
     "author": "Pablo Rascazzi",
-    "version": (0, 7, 1),
+    "version": (0, 7, 2),
     "blender": (2, 92, 0),
     "location": "File > Export > OpenGL Exporter",
     "category": "Import-Export"
@@ -134,12 +134,20 @@ class BoneCurve():
     def __init__(self):
         self.index = None
         self.name = None
+        self.matrix = None
         self.location = [0,0,0]
         self.scale = [0,0,0]
         self.quaternion = [0,0,0,0]
         
-    def log(self):
+    def log(self, precision):
         print(' > Bone Name: %s' % self.name)
+        if self.matrix != None:
+            matrix_arr = matrix_to_float16(self.matrix, precision)
+            print(' == > Local Matrix:')
+            print('         ', matrix_arr[0:4])
+            print('         ', matrix_arr[4:8])
+            print('         ', matrix_arr[8:12])
+            print('         ', matrix_arr[12:16])
         print(' == > Bone Index: %d' % self.index)
         print(' == > Location:   ', self.location)
         print(' == > Scale:      ', self.scale)
@@ -151,22 +159,27 @@ class Animframe():
         self.timestamp = None
         self.bone_curves = []
         
-    def log(self):
+    def log(self, precision):
         print(' > Timestamp: %f' % self.timestamp)
         print(' > Bone Curves:')
-        for curve in self.bone_curves: curve.log()
+        for curve in self.bone_curves: curve.log(precision)
     
 
 #######################################################################################################################
 #                                                     Utilities                                                       #
 #######################################################################################################################
 
+def f_round(num, precision):
+    rnd_num = round(num, precision)
+    return 0 if rnd_num == 0 or rnd_num == -0 else rnd_num
+    
+
 def matrix_to_float16(matrix, precision):
     float16 = []
-    float16.extend([round(matrix[0][0], precision), round(matrix[0][1], precision), round(matrix[0][2], precision), round(matrix[0][3], precision)])
-    float16.extend([round(matrix[1][0], precision), round(matrix[1][1], precision), round(matrix[1][2], precision), round(matrix[1][3], precision)])
-    float16.extend([round(matrix[2][0], precision), round(matrix[2][1], precision), round(matrix[2][2], precision), round(matrix[2][3], precision)])
-    float16.extend([round(matrix[3][0], precision), round(matrix[3][1], precision), round(matrix[3][2], precision), round(matrix[3][3], precision)])
+    float16.extend([f_round(matrix[0][0], precision), f_round(matrix[0][1], precision), f_round(matrix[0][2], precision), f_round(matrix[0][3], precision)])
+    float16.extend([f_round(matrix[1][0], precision), f_round(matrix[1][1], precision), f_round(matrix[1][2], precision), f_round(matrix[1][3], precision)])
+    float16.extend([f_round(matrix[2][0], precision), f_round(matrix[2][1], precision), f_round(matrix[2][2], precision), f_round(matrix[2][3], precision)])
+    float16.extend([f_round(matrix[3][0], precision), f_round(matrix[3][1], precision), f_round(matrix[3][2], precision), f_round(matrix[3][3], precision)])
     return float16
     
 
@@ -188,7 +201,7 @@ def process_armature_data(armature, flip_axis, precision, logging):
         new_bone.name = bone.name
         
         if bone.parent == None: 
-            new_bone.local_bind_transform = bone.matrix_local
+            new_bone.local_bind_transform = conversion @ bone.matrix_local if flip_axis == True else bone.matrix_local
             root_bone = new_bone
         else: 
             new_bone.local_bind_transform = bone.parent.matrix_local.inverted() @ bone.matrix_local.copy()
@@ -235,38 +248,40 @@ def process_animation_data(armature, bones_dict, flip_axis, export_frames, frame
         print('Frame Times:', frame_times)
     
     for frame in frame_times:
+        bpy.context.scene.frame_set(frame)
+        
         new_frame = Animframe()
         if time_format == 'frames': new_frame.timestamp = frame
         elif time_format == 'seconds': new_frame.timestamp = (round(frame/fps, 8))
         else: raise Error('Invalid animation time format.')
         
-        for group in action.groups:
-            if group.name not in bones_dict:
-                print('Warning: Non-bone FCurves not supported.') 
+        for pose_bone in armature.pose.bones:
+            if pose_bone.name not in bones_dict:
+                print('Warning: PoseBone "%s" missing from armature "%s".' %(pose_bone.name, armature.name))
                 continue
             
             new_curve = BoneCurve()
-            new_curve.name = group.name
-            new_curve.index = bones_dict[group.name].index
-            quaternion_list = [1,0,0,0]
+            new_curve.name = pose_bone.name
+            new_curve.index = bones_dict[pose_bone.name].index
             
-            for fcurve in group.channels:
-                if   fcurve.data_path.endswith('location'): 
-                    new_curve.location[fcurve.array_index] = round(fcurve.evaluate(frame), precision)
-                elif fcurve.data_path.endswith('scale'): 
-                    new_curve.scale[fcurve.array_index] = round(fcurve.evaluate(frame), precision)
-                elif fcurve.data_path.endswith('rotation_quaternion'):
-                    quaternion_list[fcurve.array_index] = fcurve.evaluate(frame)
-                    
-            quaternion = mathutils.Quaternion(quaternion_list)
-            new_curve.quaternion = [round(quaternion.x, precision), round(quaternion.y, precision), round(quaternion.z, precision), round(quaternion.w, precision)]
+            if pose_bone.parent == None:
+                pose_bone_matrix = pose_bone.matrix
+            else:
+                pose_bone_matrix = pose_bone.parent.matrix.inverted() @ pose_bone.matrix
+            
+            pose_bone_location, pose_bone_quaternion, pose_bone_scale = pose_bone_matrix.decompose()
+            
+            new_curve.matrix = pose_bone_matrix
+            new_curve.location = [f_round(pose_bone_location.x, precision), f_round(pose_bone_location.y, precision), f_round(pose_bone_location.z, precision)]
+            new_curve.scale = [f_round(pose_bone_scale.x, precision), f_round(pose_bone_scale.y, precision), f_round(pose_bone_scale.z, precision)]
+            new_curve.quaternion = [f_round(pose_bone_quaternion.x, precision), f_round(pose_bone_quaternion.y, precision), f_round(pose_bone_quaternion.z, precision), f_round(pose_bone_quaternion.w, precision)]
             
             new_frame.bone_curves.append(new_curve)
         anim_frames.append(new_frame)
             
     if logging == True: 
         print('Animation Frames:')
-        for anim_frame in anim_frames: anim_frame.log()
+        for anim_frame in anim_frames: anim_frame.log(precision)
         
     return frame_range, anim_frames
 
