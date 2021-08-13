@@ -4,18 +4,21 @@ import math
 import sys
 import numpy
 from enum import Enum
+from bpy_extras.io_utils import axis_conversion
 
 bl_info = {
     "name": "OpenGL Exporter Add-on",
     "description": "Exports blender data in a more optimized format for OpenGL.",
     "author": "Pablo Rascazzi",
-    "version": (0, 7),
+    "version": (0, 7, 1),
     "blender": (2, 92, 0),
     "location": "File > Export > OpenGL Exporter",
     "category": "Import-Export"
 }
 
 identifier = 1129529682
+
+conversion = axis_conversion(from_forward='Y', from_up='Z', to_forward='-Z', to_up='Y').to_4x4()
 
 #######################################################################################################################
 #                                                 Class Definitions                                                   #
@@ -89,7 +92,10 @@ class BoneInfo():
         self.index = None
         self.name = None
         self.local_bind_transform = None
+        self.local_bind_transform_transposed = None
+        self.local_bind_transform_transposed_converted = None
         self.inverse_bind_transform = None
+        self.inverse_bind_transform_converted = None
         self.children = []
         
     def get_children_indices(self):
@@ -98,11 +104,11 @@ class BoneInfo():
             children_indices.append(child.index)
         return children_indices
         
-    def calc_inverse_bind_transform(self, parent_bind_transform):
+    def calc_inverse_bind_transform(self, flip_axis, parent_bind_transform):
         bind_transform = parent_bind_transform @ self.local_bind_transform
         self.inverse_bind_transform = bind_transform.inverted()
         for child in self.children:
-            child.calc_inverse_bind_transform(bind_transform)
+            child.calc_inverse_bind_transform(flip_axis, bind_transform)
         
     def log(self, precision):
         print(' > Bone Name: %s' % self.name)
@@ -142,11 +148,11 @@ class BoneCurve():
     
 class Animframe():
     def __init__(self):
-        self.frame = None
+        self.timestamp = None
         self.bone_curves = []
         
     def log(self):
-        print(' > Frame: %s' % self.frame)
+        print(' > Timestamp: %f' % self.timestamp)
         print(' > Bone Curves:')
         for curve in self.bone_curves: curve.log()
     
@@ -192,7 +198,7 @@ def process_armature_data(armature, flip_axis, precision, logging):
         next_index += 1
         
     # Recursively call calc_inverse_bind_transform() to calculate all inverse_bind_transform
-    root_bone.calc_inverse_bind_transform(mathutils.Matrix().Identity(4))
+    root_bone.calc_inverse_bind_transform(flip_axis, mathutils.Matrix().Identity(4))
 
     # Log BoneInfo dictionary
     if logging == True:  
@@ -201,11 +207,15 @@ def process_armature_data(armature, flip_axis, precision, logging):
     return bones_dict
 
 
-def process_animation_data(armature, bones_dict, flip_axis, export_frames, frame_interval, precision, logging):
+def process_animation_data(armature, bones_dict, flip_axis, export_frames, frame_interval, time_format, precision, logging):
     if logging == True: print("Processing animation data...")
     action = armature.animation_data.action
+    fps = bpy.context.scene.render.fps
     
-    frame_range = [int(action.frame_range[0]), int(action.frame_range[1])]
+    if time_format == 'frames': frame_range = [float(action.frame_range[0]), float(action.frame_range[1])]
+    elif time_format == 'seconds': frame_range = [round(action.frame_range[0]/fps, 8), round(action.frame_range[1]/fps, 8)]
+    else: raise Error('Invalid animation time format.')
+    
     frame_times = []
     anim_frames = []
 
@@ -216,33 +226,45 @@ def process_animation_data(armature, bones_dict, flip_axis, export_frames, frame
         for fcurve in action.fcurves:
             frame_times.extend([int(time.co[0]) for time in fcurve.keyframe_points if int(time.co[0]) not in frame_times]) 
     elif export_frames == 'interval':
-        frame_times = list(range(frame_range[0], frame_range[1]+1, frame_interval))
+        frame_times = list(range(int(action.frame_range[0]), int(action.frame_range[1]+1), frame_interval))
     else: raise Error('Invalid animation export frames.')
-    
     frame_times.sort()
+    
+    if logging == True: 
+        print('Frame Range:', frame_range)
+        print('Frame Times:', frame_times)
+    
     for frame in frame_times:
         new_frame = Animframe()
-        new_frame.frame = frame
+        if time_format == 'frames': new_frame.timestamp = frame
+        elif time_format == 'seconds': new_frame.timestamp = (round(frame/fps, 8))
+        else: raise Error('Invalid animation time format.')
         
         for group in action.groups:
+            if group.name not in bones_dict:
+                print('Warning: Non-bone FCurves not supported.') 
+                continue
+            
             new_curve = BoneCurve()
             new_curve.name = group.name
             new_curve.index = bones_dict[group.name].index
+            quaternion_list = [1,0,0,0]
             
             for fcurve in group.channels:
                 if   fcurve.data_path.endswith('location'): 
                     new_curve.location[fcurve.array_index] = round(fcurve.evaluate(frame), precision)
                 elif fcurve.data_path.endswith('scale'): 
                     new_curve.scale[fcurve.array_index] = round(fcurve.evaluate(frame), precision)
-                elif fcurve.data_path.endswith('rotation_quaternion'):  
-                    new_curve.quaternion[3 if fcurve.array_index == 0 else fcurve.array_index-1] = round(fcurve.evaluate(frame), precision)
+                elif fcurve.data_path.endswith('rotation_quaternion'):
+                    quaternion_list[fcurve.array_index] = fcurve.evaluate(frame)
+                    
+            quaternion = mathutils.Quaternion(quaternion_list)
+            new_curve.quaternion = [round(quaternion.x, precision), round(quaternion.y, precision), round(quaternion.z, precision), round(quaternion.w, precision)]
             
             new_frame.bone_curves.append(new_curve)
         anim_frames.append(new_frame)
             
     if logging == True: 
-        print('Frame Range:', frame_range)
-        print('Frame Times:', frame_times)
         print('Animation Frames:')
         for anim_frame in anim_frames: anim_frame.log()
         
@@ -284,16 +306,16 @@ def process_model_data(object, model_type, bones_dict, buffer_format, flip_axis,
         for li in face.loop_indices:
             vi = loop[li].vertex_index # vertex Index
             vert = []
-            vert.append(round(mesh.vertices[vi].co.x, precision))
-            vert.append(round(mesh.vertices[vi].co.z, precision)  if flip_axis == True else round(mesh.vertices[vi].co.y, precision))
-            vert.append(round(-mesh.vertices[vi].co.y, precision) if flip_axis == True else round(mesh.vertices[vi].co.z, precision))
+            position = mathutils.Vector([mesh.vertices[vi].co.x, mesh.vertices[vi].co.y, mesh.vertices[vi].co.z])
+            if flip_axis == True: position.rotate(conversion)
+            vert.extend([round(position.x, precision), round(position.y, precision), round(position.z, precision)])
             if 'uv' in model_type.name:
                 vert.append(round(uv_layer[li].uv.x, precision))
                 vert.append(round(uv_layer[li].uv.y, precision))
             if 'tbn' in model_type.name:
-                vert.append(round(loop[li].normal[0], precision))
-                vert.append(round(loop[li].normal[2], precision)  if flip_axis == True else round(loop[li].normal[1], precision))
-                vert.append(-round(loop[li].normal[1], precision) if flip_axis == True else round(loop[li].normal[2], precision))
+                normal = mathutils.Vector([loop[li].normal[0], loop[li].normal[1], loop[li].normal[2]])
+                if flip_axis == True: normal.rotate(conversion)
+                vert.extend([round(normal.x, precision), round(normal.y, precision), round(normal.z, precision)])
             if 'Rigged' in model_type.name:
                 vb = [] # vertex bones
                 for group in mesh.vertices[vi].groups:
@@ -383,16 +405,18 @@ def write_to_animation_file(file_path, file_format, byte_order, frame_range, ani
         if logging == True: print("Writing binary animation data to file...")
         f = open(file_path, 'wb')
         
-        print('identifier: %d', identifier)
         f.write(identifier.to_bytes(4, byte_order, signed=True))
         f.write(bl_info['version'][0].to_bytes(4, byte_order, signed=True))
         f.write(bl_info['version'][1].to_bytes(4, byte_order, signed=True))
-        f.write(frame_range[0].to_bytes(4, byte_order, signed=True))
-        f.write(frame_range[1].to_bytes(4, byte_order, signed=True))
+        range_byte_array = numpy.array(frame_range[0:2], 'float32')
+        if swap_bytes == True: range_byte_array.byteswap()
+        range_byte_array.tofile(f)
         f.write(len(anim_frames).to_bytes(4, byte_order, signed=True))
         f.write(len(anim_frames[0].bone_curves).to_bytes(4, byte_order, signed=True))
         for anim_frame in anim_frames:
-            f.write(anim_frame.frame.to_bytes(4, byte_order, signed=True))
+            time_byte_array = numpy.array([float(anim_frame.timestamp)], 'float32')
+            if swap_bytes == True: time_byte_array.byteswap()
+            time_byte_array.tofile(f)
             for bone_curve in anim_frame.bone_curves:
                 f.write(bone_curve.index.to_bytes(4, byte_order, signed=True))
                 location_byte_array = numpy.array(bone_curve.location, 'float32')
@@ -448,9 +472,9 @@ def write_to_armature_file(file_path, file_format, byte_order, bones_dict, armt_
             f.write(len(bone.name).to_bytes(4, byte_order, signed=True))
             f.write(bone.name.encode('utf-8'))
             if armt_matrix == 'local_bind_transform':
-                bone_matrix = matrix_to_float16(bone.local_bind_transform, precision)
+                bone_matrix = matrix_to_float16(bone.local_bind_transform.transposed(), precision)
             elif armt_matrix == 'inverse_bind_transform':
-                bone_matrix = matrix_to_float16(bone.inverse_bind_transform, precision)
+                bone_matrix = matrix_to_float16(bone.inverse_bind_transform.transposed(), precision)
             else: raise Error('Invalid bone matrix transformation.')
             matrix_byte_array = numpy.array(bone_matrix, 'float32')
             if swap_bytes == True: matrix_byte_array.byteswap()
@@ -661,7 +685,7 @@ def get_model_type(uv_bool, normals_bool, rigging_bool, logging):
 
 def execute_exporter(self, context):
     print('\nEXPORTER STARTED')
-    print('Exporter Version: %d.%d' % (bl_info['version'][0], bl_info['version'][1]))
+    print('Exporter Version: %d.%d.%d' % (bl_info['version'][0], bl_info['version'][1], bl_info['version'][1]))
     
     try:
         if self.model_bool == False and self.armt_bool == False and self.anim_bool == False:
@@ -692,7 +716,7 @@ def execute_exporter(self, context):
         # Process and export all Animation data
         if self.anim_bool == True:
             for armature in armature_list:
-                frame_range, anim_frames = process_animation_data(armature, armature_dict[armature.name], self.flip_axis, self.anim_export_frames, self.anim_frame_interval, self.precision, self.logging)
+                frame_range, anim_frames = process_animation_data(armature, armature_dict[armature.name], self.flip_axis, self.anim_export_frames, self.anim_frame_interval, self.anim_time_format, self.precision, self.logging)
                 write_to_animation_file(file_path, self.file_format, self.byte_order, frame_range, anim_frames, self.logging)
             print('ANIMATION EXPORT FINISHED')
            
@@ -840,6 +864,15 @@ class OpenGLExporter(Operator, ExportHelper):
     )
     
     # Animation Settings
+    anim_time_format: EnumProperty(
+        name="Time Format",
+        description="Choose the way time is represented",
+        items=(
+            ('seconds', "Seconds", "Timestamp is in seconds (1 second is 24 frames)"),
+            ('frames',  "Frames",  "Timestamp is in frames"),
+        ),
+        default='seconds',
+    )
     anim_export_frames: EnumProperty(
         name="Frames",
         description="Choose frames to export",
@@ -848,7 +881,7 @@ class OpenGLExporter(Operator, ExportHelper):
             ('keyframe_points', "All Keyframe Points", "Export all frames that have a Keyframe point"),
             ('interval', "Specified Interval", "Export frames at the specified interval"),
         ),
-        default='action_pose_markers',
+        default='keyframe_points',
     )
     anim_frame_interval: IntProperty(
         name="Interval",
@@ -871,7 +904,7 @@ class OpenGLExporter(Operator, ExportHelper):
         general_box.prop(self, 'precision')
         general_box_disabled = general_box.column()
         general_box_disabled.prop(self, 'flip_axis')
-        general_box_disabled.enabled = False
+        general_box_disabled.enabled = True
         general_box.prop(self, 'logging')
         general_includes_box = general_box.box()
         general_includes_box.label(text='Includes:')
@@ -898,6 +931,7 @@ class OpenGLExporter(Operator, ExportHelper):
         
         anim_box = layout.box()
         anim_box.label(text='Animation Settings:')
+        anim_box.prop(self, 'anim_time_format')
         anim_box.prop(self, 'anim_export_frames')
         anim_box_interval = anim_box.column()
         anim_box_interval.prop(self, 'anim_frame_interval')
