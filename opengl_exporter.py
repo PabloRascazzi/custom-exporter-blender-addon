@@ -10,7 +10,7 @@ bl_info = {
     "name": "OpenGL Exporter Add-on",
     "description": "Exports blender data in a more optimized format for OpenGL.",
     "author": "Pablo Rascazzi",
-    "version": (0, 7, 3),
+    "version": (0, 7, 4),
     "blender": (2, 92, 0),
     "location": "File > Export > OpenGL Exporter",
     "category": "Import-Export"
@@ -57,6 +57,57 @@ class ModelType(OrderedEnum):
     xyztbnRigged   = 6
     xyzuvtbnRigged = 7
 
+
+class ExportContext():
+    def __init__(self):
+        # General Settings
+        self.object_selection = None
+        self.file_format = None
+        self.byte_order = None
+        self.precision = None
+        self.flip_axis = None
+        self.logging = None
+        # Export Includes
+        self.include_model = None
+        self.include_armt = None
+        self.include_anim = None
+        # Model Settings
+        self.model_buffer_format = None
+        self.include_uvs = None
+        self.include_normals = None
+        self.include_bones = None
+        # Armature Settings
+        self.armt_matrix = None
+        # Animation Settings
+        self.anim_time_format = None
+        self.anim_export_frames = None
+        self.anim_frame_interval = None
+        
+    def log(self):
+        print('Exporter Context:')
+        print(' > Exporter Version: %d.%d.%d' % (bl_info['version'][0], bl_info['version'][1], bl_info['version'][2]))
+        print(' > Export File Format: %s' % (self.file_format))
+        print(' > Export Byte Order: %s' % (self.byte_order))
+        print(' > Export Precision: %s' % (self.precision))
+        print(' > Object Selection: %s' % (self.object_selection))
+        print(' > Convert to OpenGL Axis: %s' % (self.flip_axis))
+        print(' > Logging: %s' % (self.logging))
+        print(' > Export Includes:')
+        print(' == > Include Models: %s' % (self.include_model))
+        print(' == > Include Armatures: %s' % (self.include_armt))
+        print(' == > Include Animations: %s' % (self.include_anim))
+        print(' > Model Settings:')
+        print(' == > Buffer Format: %s' % (self.model_buffer_format))
+        print(' == > Include UV: %s' % (self.include_uvs))
+        print(' == > Include Normals: %s' % (self.include_normals))
+        print(' == > Include Bones: %s' % (self.include_bones))
+        print(' > Armature Settings:')
+        print(' == > Matrix Type: %s' % (self.armt_matrix))
+        print(' > Animation Settings:')
+        print(' == > Time Format: %s' % (self.anim_time_format))
+        print(' == > Export Frames: %s' % (self.anim_export_frames))
+        print(' == > Frame Interval: %s' % (self.anim_frame_interval))
+        
 
 class Model():  
     def __init__(self, type, vertex_stride, vertex_count, vertices, material_count, indices_list, uvs = None, normals = None, weight_indices = None, weights = None):
@@ -130,7 +181,18 @@ class BoneInfo():
             print('         ', inverse_bind_transform_arr[12:16])
 
 
-class BoneCurve():
+class AnimationKeyframe():
+    def __init__(self):
+        self.timestamp = None
+        self.bone_curves = []
+        
+    def log(self, precision):
+        print(' > Timestamp: %f' % self.timestamp)
+        print(' > Bone Curves:')
+        for curve in self.bone_curves: curve.log(precision)
+
+
+class BoneTransform():
     def __init__(self):
         self.index = None
         self.name = None
@@ -141,6 +203,7 @@ class BoneCurve():
         
     def log(self, precision):
         print(' > Bone Name: %s' % self.name)
+        print(' == > Bone Index: %d' % self.index)
         if self.matrix != None:
             matrix_arr = matrix_to_float16(self.matrix, precision)
             print(' == > Local Matrix:')
@@ -148,21 +211,9 @@ class BoneCurve():
             print('         ', matrix_arr[4:8])
             print('         ', matrix_arr[8:12])
             print('         ', matrix_arr[12:16])
-        print(' == > Bone Index: %d' % self.index)
         print(' == > Location:   ', self.location)
         print(' == > Scale:      ', self.scale)
         print(' == > Quaternion: ', self.quaternion)
-    
-    
-class Animframe():
-    def __init__(self):
-        self.timestamp = None
-        self.bone_curves = []
-        
-    def log(self, precision):
-        print(' > Timestamp: %f' % self.timestamp)
-        print(' > Bone Curves:')
-        for curve in self.bone_curves: curve.log(precision)
     
 
 #######################################################################################################################
@@ -187,8 +238,8 @@ def matrix_to_float16(matrix, precision):
 #                                                  Data Processing                                                    #
 #######################################################################################################################
 
-def process_armature_data(armature, flip_axis, precision, logging):
-    if logging == True: print("Processing armature data...")   
+def process_armature_data(export_context, armature):
+    if export_context.logging == True: print("Processing armature data...")   
     bones_dict = {} # dict of bones with bone names as key (bone.name == vertex_group.name)
     
     root_bone = None
@@ -201,7 +252,7 @@ def process_armature_data(armature, flip_axis, precision, logging):
         new_bone.name = bone.name
         
         if bone.parent == None: 
-            new_bone.local_bind_transform = conversion @ bone.matrix_local if flip_axis == True else bone.matrix_local
+            new_bone.local_bind_transform = conversion @ bone.matrix_local if export_context.flip_axis == True else bone.matrix_local
             root_bone = new_bone
         else: 
             new_bone.local_bind_transform = bone.parent.matrix_local.inverted() @ bone.matrix_local.copy()
@@ -211,48 +262,46 @@ def process_armature_data(armature, flip_axis, precision, logging):
         next_index += 1
         
     # Recursively call calc_inverse_bind_transform() to calculate all inverse_bind_transform
-    root_bone.calc_inverse_bind_transform(flip_axis, mathutils.Matrix().Identity(4))
+    root_bone.calc_inverse_bind_transform(export_context.flip_axis, mathutils.Matrix().Identity(4))
 
     # Log BoneInfo dictionary
-    if logging == True:  
-        for key in bones_dict: bones_dict[key].log(precision)
+    if export_context.logging == True:  
+        for key in bones_dict: bones_dict[key].log(export_context.precision)
             
     return bones_dict
 
 
-def process_animation_data(armature, bones_dict, flip_axis, export_frames, frame_interval, time_format, precision, logging):
-    if logging == True: print("Processing animation data...")
+def process_animation_data(export_context, armature, bones_dict):
+    if export_context.logging == True: print("Processing animation data...")
     action = armature.animation_data.action
     fps = bpy.context.scene.render.fps
     
-    if time_format == 'frames': frame_range = [float(action.frame_range[0]), float(action.frame_range[1])]
-    elif time_format == 'seconds': frame_range = [round(action.frame_range[0]/fps, 8), round(action.frame_range[1]/fps, 8)]
+    if export_context.anim_time_format == 'frames': frame_range = [float(action.frame_range[0]), float(action.frame_range[1])]
+    elif export_context.anim_time_format == 'seconds': frame_range = [round(action.frame_range[0]/fps, 8), round(action.frame_range[1]/fps, 8)]
     else: raise Error('Invalid animation time format.')
     
     frame_times = []
     anim_frames = []
 
-    if export_frames == 'action_pose_markers':
-        for marker in action.pose_markers: 
-            frame_times.append(marker.frame)
-    elif export_frames == 'keyframe_points':
-        for fcurve in action.fcurves:
-            frame_times.extend([int(time.co[0]) for time in fcurve.keyframe_points if int(time.co[0]) not in frame_times]) 
-    elif export_frames == 'interval':
-        frame_times = list(range(int(action.frame_range[0]), int(action.frame_range[1]+1), frame_interval))
+    if export_context.anim_export_frames == 'action_pose_markers':
+        for marker in action.pose_markers: frame_times.append(marker.frame)
+    elif export_context.anim_export_frames == 'keyframe_points':
+        for fcurve in action.fcurves: frame_times.extend([int(time.co[0]) for time in fcurve.keyframe_points if int(time.co[0]) not in frame_times]) 
+    elif export_context.anim_export_frames == 'interval':
+        frame_times = list(range(int(action.frame_range[0]), int(action.frame_range[1]+1), export_context.anim_frame_interval))
     else: raise Error('Invalid animation export frames.')
     frame_times.sort()
     
-    if logging == True: 
+    if export_context.logging == True: 
         print('Frame Range:', frame_range)
         print('Frame Times:', frame_times)
     
     for frame in frame_times:
         bpy.context.scene.frame_set(frame)
         
-        new_frame = Animframe()
-        if time_format == 'frames': new_frame.timestamp = frame
-        elif time_format == 'seconds': new_frame.timestamp = (round(frame/fps, 8))
+        new_frame = AnimationKeyframe()
+        if export_context.anim_time_format == 'frames': new_frame.timestamp = frame
+        elif export_context.anim_time_format == 'seconds': new_frame.timestamp = (round(frame/fps, 8))
         else: raise Error('Invalid animation time format.')
         
         for pose_bone in armature.pose.bones:
@@ -260,33 +309,33 @@ def process_animation_data(armature, bones_dict, flip_axis, export_frames, frame
                 print('Warning: PoseBone "%s" missing from armature "%s".' %(pose_bone.name, armature.name))
                 continue
             
-            new_curve = BoneCurve()
+            new_curve = BoneTransform()
             new_curve.name = pose_bone.name
             new_curve.index = bones_dict[pose_bone.name].index
             
             if pose_bone.parent == None:
-                pose_bone_matrix = conversion @ pose_bone.matrix if flip_axis else pose_bone.matrix
+                pose_bone_matrix = conversion @ pose_bone.matrix if export_context.flip_axis else pose_bone.matrix
             else:
                 pose_bone_matrix = pose_bone.parent.matrix.inverted() @ pose_bone.matrix
             pose_bone_location, pose_bone_quaternion, pose_bone_scale = pose_bone_matrix.decompose()
             
             new_curve.matrix = pose_bone_matrix
-            new_curve.location = [f_round(pose_bone_location.x, precision), f_round(pose_bone_location.y, precision), f_round(pose_bone_location.z, precision)]
-            new_curve.scale = [f_round(pose_bone_scale.x, precision), f_round(pose_bone_scale.y, precision), f_round(pose_bone_scale.z, precision)]
-            new_curve.quaternion = [f_round(pose_bone_quaternion.x, precision), f_round(pose_bone_quaternion.y, precision), f_round(pose_bone_quaternion.z, precision), f_round(pose_bone_quaternion.w, precision)]
+            new_curve.location = [f_round(pose_bone_location.x, export_context.precision), f_round(pose_bone_location.y, export_context.precision), f_round(pose_bone_location.z, export_context.precision)]
+            new_curve.scale = [f_round(pose_bone_scale.x, export_context.precision), f_round(pose_bone_scale.y, export_context.precision), f_round(pose_bone_scale.z, export_context.precision)]
+            new_curve.quaternion = [f_round(pose_bone_quaternion.w, export_context.precision), f_round(pose_bone_quaternion.x, export_context.precision), f_round(pose_bone_quaternion.y, export_context.precision), f_round(pose_bone_quaternion.z, export_context.precision)]
             
             new_frame.bone_curves.append(new_curve)
         anim_frames.append(new_frame)
             
-    if logging == True: 
+    if export_context.logging == True: 
         print('Animation Frames:')
-        for anim_frame in anim_frames: anim_frame.log(precision)
+        for anim_frame in anim_frames: anim_frame.log(export_context.precision)
         
     return frame_range, anim_frames
 
 
-def process_model_data(object, model_type, bones_dict, buffer_format, flip_axis, precision, logging):
-    if logging == True: print("Processing model data...")
+def process_model_data(export_context, object, model_type, bones_dict):
+    if export_context.logging == True: print("Processing model data...")
     
     # Initialize variables and data
     mesh = object.data
@@ -321,15 +370,15 @@ def process_model_data(object, model_type, bones_dict, buffer_format, flip_axis,
             vi = loop[li].vertex_index # vertex Index
             vert = []
             position = mathutils.Vector([mesh.vertices[vi].co.x, mesh.vertices[vi].co.y, mesh.vertices[vi].co.z])
-            if flip_axis == True: position.rotate(conversion)
-            vert.extend([round(position.x, precision), round(position.y, precision), round(position.z, precision)])
+            if export_context.flip_axis == True: position.rotate(conversion)
+            vert.extend([round(position.x, export_context.precision), round(position.y, export_context.precision), round(position.z, export_context.precision)])
             if 'uv' in model_type.name:
-                vert.append(round(uv_layer[li].uv.x, precision))
-                vert.append(round(uv_layer[li].uv.y, precision))
+                vert.append(round(uv_layer[li].uv.x, export_context.precision))
+                vert.append(round(uv_layer[li].uv.y, export_context.precision))
             if 'tbn' in model_type.name:
                 normal = mathutils.Vector([loop[li].normal[0], loop[li].normal[1], loop[li].normal[2]])
-                if flip_axis == True: normal.rotate(conversion)
-                vert.extend([round(normal.x, precision), round(normal.y, precision), round(normal.z, precision)])
+                if export_context.flip_axis == True: normal.rotate(conversion)
+                vert.extend([round(normal.x, export_context.precision), round(normal.y, export_context.precision), round(normal.z, export_context.precision)])
             if 'Rigged' in model_type.name:
                 vb = [] # vertex bones
                 for group in mesh.vertices[vi].groups:
@@ -346,15 +395,15 @@ def process_model_data(object, model_type, bones_dict, buffer_format, flip_axis,
                   
                 # Add bone indices and bone weights to vertex
                 for bi in range(bones_per_vertex): vert.append(int(vb[bi][0]))
-                for bi in range(bones_per_vertex): vert.append(round(vb[bi][1], precision))
+                for bi in range(bones_per_vertex): vert.append(round(vb[bi][1], export_context.precision))
             
             vert_key = str(vert)
             if vert_key not in vert_dict:
                 vert_dict[vert_key] = next_index
                 
-                if buffer_format == 'single_buffer':
+                if export_context.model_buffer_format == 'single_buffer':
                     vertices.extend(vert)
-                elif buffer_format == 'separate_buffers':
+                elif export_context.model_buffer_format == 'separate_buffers':
                     vertices.extend(vert[0:3])
                     next_vert_index = 3
                     if 'uv' in model_type.name:
@@ -395,11 +444,13 @@ def process_model_data(object, model_type, bones_dict, buffer_format, flip_axis,
                     indices[face.material_index].append(tmp_indices[0])
                     indices[face.material_index].append(tmp_indices[i])
 
-    if buffer_format == 'single_buffer':
+    if export_context.model_buffer_format == 'single_buffer':
         new_model = Model(model_type, vertex_stride, len(vert_dict), vertices, len(indices), indices)
-    elif buffer_format == 'separate_buffers':
+    elif export_context.model_buffer_format == 'separate_buffers':
         new_model = Model(model_type, vertex_stride, len(vert_dict), vertices, len(indices), indices, uvs, normals, weights, weight_indices)
     else: raise Error('Invalid vertex buffer format.')
+    
+    if export_context.logging == True: new_model.log(export_context.model_buffer_format)
     return new_model
 
 
@@ -407,32 +458,32 @@ def process_model_data(object, model_type, bones_dict, buffer_format, flip_axis,
 #                                                    File Writing                                                     #
 #######################################################################################################################
 
-def write_to_animation_file(file_path, file_format, byte_order, frame_range, anim_frames, logging):
+def write_to_animation_file(export_context, file_path, frame_range, anim_frames):
     file_path = file_path + ".anim"
-    if logging == True: print('File save location: %s' % file_path)
+    if export_context.logging == True: print('File save location: %s' % file_path)
     
-    if file_format == 'Binary':
+    if export_context.file_format == 'Binary':
         swap_bytes = False
-        if (sys.byteorder == 'little' and byte_order != 'little') or (sys.byteorder == 'big' and byte_order != 'big'): swap_bytes = True
+        if (sys.byteorder == 'little' and export_context.byte_order != 'little') or (sys.byteorder == 'big' and export_context.byte_order != 'big'): swap_bytes = True
         elif sys.byteorder != 'little' and sys.byteorder != 'big': raise Error('Invalid byte order.')
         
-        if logging == True: print("Writing binary animation data to file...")
+        if export_context.logging == True: print("Writing binary animation data to file...")
         f = open(file_path, 'wb')
         
-        f.write(identifier.to_bytes(4, byte_order, signed=True))
-        f.write(bl_info['version'][0].to_bytes(4, byte_order, signed=True))
-        f.write(bl_info['version'][1].to_bytes(4, byte_order, signed=True))
+        f.write(identifier.to_bytes(4, export_context.byte_order, signed=True))
+        f.write(bl_info['version'][0].to_bytes(4, export_context.byte_order, signed=True))
+        f.write(bl_info['version'][1].to_bytes(4, export_context.byte_order, signed=True))
         range_byte_array = numpy.array(frame_range[0:2], 'float32')
         if swap_bytes == True: range_byte_array.byteswap()
         range_byte_array.tofile(f)
-        f.write(len(anim_frames).to_bytes(4, byte_order, signed=True))
-        f.write(len(anim_frames[0].bone_curves).to_bytes(4, byte_order, signed=True))
+        f.write(len(anim_frames).to_bytes(4, export_context.byte_order, signed=True))
+        f.write(len(anim_frames[0].bone_curves).to_bytes(4, export_context.byte_order, signed=True))
         for anim_frame in anim_frames:
             time_byte_array = numpy.array([float(anim_frame.timestamp)], 'float32')
             if swap_bytes == True: time_byte_array.byteswap()
             time_byte_array.tofile(f)
             for bone_curve in anim_frame.bone_curves:
-                f.write(bone_curve.index.to_bytes(4, byte_order, signed=True))
+                f.write(bone_curve.index.to_bytes(4, export_context.byte_order, signed=True))
                 location_byte_array = numpy.array(bone_curve.location, 'float32')
                 if swap_bytes == True: location_byte_array.byteswap()
                 location_byte_array.tofile(f)
@@ -444,8 +495,8 @@ def write_to_animation_file(file_path, file_format, byte_order, frame_range, ani
                 quaternion_byte_array.tofile(f)
     
         f.close()
-    elif file_format == 'ASCII':
-        if logging == True: print("Writing ASCII animation data to file...")
+    elif export_context.file_format == 'ASCII':
+        if export_context.logging == True: print("Writing ASCII animation data to file...")
         f = open(file_path, 'w')
         
         f.write('vers %d %d\n' % (bl_info['version'][0], bl_info['version'][1]))
@@ -464,44 +515,44 @@ def write_to_animation_file(file_path, file_format, byte_order, frame_range, ani
     else: raise Error('Invalid file format.')
     
 
-def write_to_armature_file(file_path, file_format, byte_order, bones_dict, armt_matrix, precision, logging):
+def write_to_armature_file(export_context, file_path, bones_dict):
     file_path = file_path + ".armt"
-    if logging == True: print('File save location: %s' % file_path)
+    if export_context.logging == True: print('File save location: %s' % file_path)
     
-    if file_format == 'Binary':
+    if export_context.file_format == 'Binary':
         swap_bytes = False
-        if (sys.byteorder == 'little' and byte_order != 'little') or (sys.byteorder == 'big' and byte_order != 'big'): swap_bytes = True
+        if (sys.byteorder == 'little' and export_context.byte_order != 'little') or (sys.byteorder == 'big' and export_context.byte_order != 'big'): swap_bytes = True
         elif sys.byteorder != 'little' and sys.byteorder != 'big': raise Error('Invalid byte order.')
         
-        if logging == True: print("Writing binary armature data to file...")
+        if export_context.logging == True: print("Writing binary armature data to file...")
         f = open(file_path, 'wb')
         
-        f.write(identifier.to_bytes(4, byte_order, signed=True))
-        f.write(bl_info['version'][0].to_bytes(4, byte_order, signed=True))
-        f.write(bl_info['version'][1].to_bytes(4, byte_order, signed=True))
-        f.write(len(bones_dict).to_bytes(4, byte_order, signed=True))
+        f.write(identifier.to_bytes(4, export_context.byte_order, signed=True))
+        f.write(bl_info['version'][0].to_bytes(4, export_context.byte_order, signed=True))
+        f.write(bl_info['version'][1].to_bytes(4, export_context.byte_order, signed=True))
+        f.write(len(bones_dict).to_bytes(4, export_context.byte_order, signed=True))
         for key in bones_dict:
             bone = bones_dict[key]
-            f.write(bone.index.to_bytes(4, byte_order, signed=True))
-            f.write(len(bone.name).to_bytes(4, byte_order, signed=True))
+            f.write(bone.index.to_bytes(4, export_context.byte_order, signed=True))
+            f.write(len(bone.name).to_bytes(4, export_context.byte_order, signed=True))
             f.write(bone.name.encode('utf-8'))
-            if armt_matrix == 'local_bind_transform':
-                bone_matrix = matrix_to_float16(bone.local_bind_transform.transposed(), precision)
-            elif armt_matrix == 'inverse_bind_transform':
-                bone_matrix = matrix_to_float16(bone.inverse_bind_transform.transposed(), precision)
+            if export_context.armt_matrix == 'local_bind_transform':
+                bone_matrix = matrix_to_float16(bone.local_bind_transform.transposed(), export_context.precision)
+            elif export_context.armt_matrix == 'inverse_bind_transform':
+                bone_matrix = matrix_to_float16(bone.inverse_bind_transform.transposed(), export_context.precision)
             else: raise Error('Invalid bone matrix transformation.')
             matrix_byte_array = numpy.array(bone_matrix, 'float32')
             if swap_bytes == True: matrix_byte_array.byteswap()
             matrix_byte_array.tofile(f)
             children_indices = bone.get_children_indices()
-            f.write(len(children_indices).to_bytes(4, byte_order, signed=True))
+            f.write(len(children_indices).to_bytes(4, export_context.byte_order, signed=True))
             indices_byte_array = numpy.array(children_indices, 'int_')
             if swap_bytes == True: indices_byte_array.byteswap()
             indices_byte_array.tofile(f)
         
         f.close()
-    elif file_format == 'ASCII':
-        if logging == True: print("Writing ASCII armature data to file...")
+    elif export_context.file_format == 'ASCII':
+        if export_context.logging == True: print("Writing ASCII armature data to file...")
         f = open(file_path, 'w')
         
         f.write('vers %d %d\n' % (bl_info['version'][0], bl_info['version'][1]))
@@ -512,10 +563,10 @@ def write_to_armature_file(file_path, file_format, byte_order, bones_dict, armt_
             f.write('nsiz %d\n' % len(bone.name))
             f.write('narr %s\n' % bone.name)
             f.write('matx')
-            if armt_matrix == 'local_bind_transform':
-                bone_matrix = matrix_to_float16(bone.local_bind_transform, precision)
-            elif armt_matrix == 'inverse_bind_transform':
-                bone_matrix = matrix_to_float16(bone.inverse_bind_transform, precision)
+            if export_context.armt_matrix == 'local_bind_transform':
+                bone_matrix = matrix_to_float16(bone.local_bind_transform, export_context.precision)
+            elif export_context.armt_matrix == 'inverse_bind_transform':
+                bone_matrix = matrix_to_float16(bone.inverse_bind_transform, export_context.precision)
             else: raise Error('Invalid bone matrix transformation.')
             for num in bone_matrix: f.write(' %f' % num)
             f.write('\n')
@@ -529,29 +580,29 @@ def write_to_armature_file(file_path, file_format, byte_order, bones_dict, armt_
     else: raise Error('Invalid file format.')
     
 
-def write_to_model_file(file_path, file_format, byte_order, model, buffer_format, logging):
+def write_to_model_file(export_context, file_path, model):
     file_path = file_path + ".model"
-    if logging == True: print('File save location: %s' % file_path)
+    if export_context.logging == True: print('File save location: %s' % file_path)
     
-    if file_format == 'Binary':
+    if export_context.file_format == 'Binary':
         swap_bytes = False
-        if (sys.byteorder == 'little' and byte_order != 'little') or (sys.byteorder == 'big' and byte_order != 'big'): swap_bytes = True
+        if (sys.byteorder == 'little' and export_context.byte_order != 'little') or (sys.byteorder == 'big' and export_context.byte_order != 'big'): swap_bytes = True
         elif sys.byteorder != 'little' and sys.byteorder != 'big': raise Error('Invalid byte order.')
         
-        if logging == True: print("Writing binary model data to file...")
+        if export_context.logging == True: print("Writing binary model data to file...")
         f = open(file_path, 'wb')
         
-        f.write(identifier.to_bytes(4, byte_order, signed=True))
-        f.write(bl_info['version'][0].to_bytes(4, byte_order, signed=True))
-        f.write(bl_info['version'][1].to_bytes(4, byte_order, signed=True))
-        f.write(model.type.value.to_bytes(4, byte_order, signed=True))
-        f.write(model.vertex_stride.to_bytes(4, byte_order, signed=True))
-        f.write(model.vertex_count.to_bytes(4, byte_order, signed=True))
-        if buffer_format == 'single_buffer':
+        f.write(identifier.to_bytes(4, export_context.byte_order, signed=True))
+        f.write(bl_info['version'][0].to_bytes(4, export_context.byte_order, signed=True))
+        f.write(bl_info['version'][1].to_bytes(4, export_context.byte_order, signed=True))
+        f.write(model.type.value.to_bytes(4, export_context.byte_order, signed=True))
+        f.write(model.vertex_stride.to_bytes(4, export_context.byte_order, signed=True))
+        f.write(model.vertex_count.to_bytes(4, export_context.byte_order, signed=True))
+        if export_context.model_buffer_format == 'single_buffer':
             vertices_byte_array = numpy.array(model.vertices, 'float32')
             if swap_bytes == True: vertices_byte_array.byteswap()
             vertices_byte_array.tofile(f)
-        elif buffer_format == 'separate_buffers':
+        elif export_context.model_buffer_format == 'separate_buffers':
             vertices_byte_array = numpy.array(model.vertices, 'float32')
             if swap_bytes == True: vertices_byte_array.byteswap()
             vertices_byte_array.tofile(f)
@@ -571,27 +622,27 @@ def write_to_model_file(file_path, file_format, byte_order, model, buffer_format
                 if swap_bytes == True: weights_byte_array.byteswap()
                 weights_byte_array.tofile(f)
         else: raise Error('Invalid vertex buffer format.')
-        f.write(model.material_count.to_bytes(4, sys.byteorder, signed=True))
+        f.write(model.material_count.to_bytes(4, export_context.byte_order, signed=True))
         for i in range(model.material_count):
-            f.write(len(model.indices_list[i]).to_bytes(4, byte_order, signed=True))
+            f.write(len(model.indices_list[i]).to_bytes(4, export_context.byte_order, signed=True))
             indices_byte_array = numpy.array(model.indices_list[i], 'int_')
             if swap_bytes == True: indices_byte_array.byteswap()
             indices_byte_array.tofile(f)
            
         f.close()
-    elif file_format == 'ASCII':
-        if logging == True: print("Writing ASCII model data to file...")
+    elif export_context.file_format == 'ASCII':
+        if export_context.logging == True: print("Writing ASCII model data to file...")
         f = open(file_path, 'w')
             
         f.write('vers %d %d\n' % (bl_info['version'][0], bl_info['version'][1]))
         f.write('mtyp %d\n' % model.type.value)
         f.write('vstr %d\n' % model.vertex_stride)
         f.write('vcnt %d\n' % model.vertex_count)
-        if buffer_format == 'single_buffer':
+        if export_context.model_buffer_format == 'single_buffer':
             f.write('varr')
             for vert in model.vertices: f.write(' %f' % vert)
             f.write('\n')
-        elif buffer_format == 'separate_buffers':
+        elif export_context.model_buffer_format == 'separate_buffers':
             f.write('varr')
             for vert in model.vertices: f.write(' %f' % vert)
             f.write('\n')
@@ -625,8 +676,8 @@ def write_to_model_file(file_path, file_format, byte_order, model, buffer_format
 #                                                       Other                                                         #
 #######################################################################################################################
 
-def make_objects_list(selection, logging):
-    if logging == True: print('Fetching objects list...')
+def make_objects_list(export_context):
+    if export_context.logging == True: print('Fetching objects list...')
     mesh_list = []
     armature_list = []
    
@@ -647,13 +698,13 @@ def make_objects_list(selection, logging):
     
     recursive = False
     selected_objects = []     
-    if selection == 'selected_only':
+    if export_context.object_selection == 'selected_only':
         recursive = False
         selected_objects = bpy.context.selected_objects
-    elif selection == 'selected_children':
+    elif export_context.object_selection == 'selected_children':
         recursive = True
         selected_objects = bpy.context.selected_objects
-    elif selection == 'all_objects':
+    elif export_context.object_selection == 'all_objects':
         recursive = True
         selected_objects = bpy.context.visible_objects
     else: raise Error('Invalid selection.')
@@ -664,32 +715,32 @@ def make_objects_list(selection, logging):
     
     if len(mesh_list) == 0: 
         raise Error('Object selection(s) have no mesh to export.')
-    if logging == True: 
+    if export_context.logging == True: 
         print(' > Mesh List:', mesh_list)
         print(' > Armature List:', armature_list)
     
     return mesh_list, armature_list
 
 
-def get_model_type(uv_bool, normals_bool, rigging_bool, logging):
-    if logging == True: print('Finding Model Type...')
+def get_model_type(export_context):
+    if export_context.logging == True: print('Finding Model Type...')
     type = None
-    if uv_bool == True:
-        if normals_bool == True:
-            if rigging_bool == True: type = ModelType.xyzuvtbnRigged
+    if export_context.include_uvs == True:
+        if export_context.include_normals == True:
+            if export_context.include_bones == True: type = ModelType.xyzuvtbnRigged
             else: type = ModelType.xyzuvtbn
         else:
-            if rigging_bool == True: type = ModelType.xyzuvRigged
+            if export_context.include_bones == True: type = ModelType.xyzuvRigged
             else: type = ModelType.xyzuv
     else:
-        if normals_bool == True:
-            if rigging_bool == True: type = ModelType.xyztbnRigged
+        if export_context.include_normals == True:
+            if export_context.include_bones == True: type = ModelType.xyztbnRigged
             else: type = ModelType.xyztbn
         else:
-            if rigging_bool == True: type = ModelType.xyzRigged
+            if export_context.include_bones == True: type = ModelType.xyzRigged
             else: type = ModelType.xyz
             
-    if logging == True: print(' > Model Type: %s' % type.name)
+    if export_context.logging == True: print(' > Model Type: %s' % type.name)
     return type
 
 
@@ -697,49 +748,49 @@ def get_model_type(uv_bool, normals_bool, rigging_bool, logging):
 #                                                   Exporter Setup                                                    #
 #######################################################################################################################
 
-def execute_exporter(self, context):
+def execute_exporter(export_context, filepath):
     print('\nEXPORTER STARTED')
-    print('Exporter Version: %d.%d.%d' % (bl_info['version'][0], bl_info['version'][1], bl_info['version'][1]))
+    export_context.log()
     
     try:
-        if self.model_bool == False and self.armt_bool == False and self.anim_bool == False:
+        # Set mode to Object
+        bpy.ops.object.mode_set(mode='OBJECT')
+        
+        if export_context.include_model == False and export_context.include_armt == False and export_context.include_anim == False:
             raise Error('Nothing to export. Select object to export in the "Includes" box.')
-            
-        file_path = self.filepath.replace(self.filename_ext, '')
-        self.rigging_bool = self.rigging_bool if self.buffer_format == 'separate_buffers' else False
         
         # Fetch all the objects to export
-        object_list, armature_list = make_objects_list(self.selection, self.logging)
+        object_list, armature_list = make_objects_list(export_context)
         
         # Find ModelType to export
-        if self.model_bool == True:
-            model_type = get_model_type(self.uv_bool, self.normals_bool, self.rigging_bool, self.logging)
+        if export_context.include_model == True:
+            model_type = get_model_type(export_context)
             
         # Process all Armature data for use in processing other data
-        if self.rigging_bool == True or self.armt_bool == True or self.anim_bool == True:
+        if export_context.include_bones == True or export_context.include_armt == True or export_context.include_anim == True:
             armature_dict = {}
             for armature in armature_list:
-                armature_dict[armature.name] = process_armature_data(armature.data, self.flip_axis, self.precision, self.logging)
+                armature_dict[armature.name] = process_armature_data(export_context, armature.data)
         
         # Write all Armature data to file
-        if self.armt_bool == True:
+        if export_context.include_armt == True:
             for key in armature_dict:
-                write_to_armature_file(file_path, self.file_format, self.byte_order, armature_dict[key], self.armt_matrix, self.precision, self.logging)
+                write_to_armature_file(export_context, filepath, armature_dict[key])
             print('ARMATURE EXPORT FINISHED')
         
         # Process and export all Animation data
-        if self.anim_bool == True:
+        if export_context.include_anim == True:
             for armature in armature_list:
-                frame_range, anim_frames = process_animation_data(armature, armature_dict[armature.name], self.flip_axis, self.anim_export_frames, self.anim_frame_interval, self.anim_time_format, self.precision, self.logging)
-                write_to_animation_file(file_path, self.file_format, self.byte_order, frame_range, anim_frames, self.logging)
+                frame_range, anim_frames = process_animation_data(export_context, armature, armature_dict[armature.name])
+                write_to_animation_file(export_context, filepath, frame_range, anim_frames)
             print('ANIMATION EXPORT FINISHED')
            
         # Process and export all model data 
-        if self.model_bool == True:
+        if export_context.include_model == True:
             for object in object_list:
                 # Fetch Object's Armature data (aka. bones_dict) for current object
                 bones_dict = None
-                if self.rigging_bool == True:
+                if export_context.include_bones == True:
                     for modifier in object.modifiers:
                         if modifier.type == 'ARMATURE':
                             bones_dict = armature_dict[modifier.object.name]
@@ -747,15 +798,11 @@ def execute_exporter(self, context):
                     if bones_dict == None: raise Error('Object "%s" missing armature.' % object.name)
                 
                 # Fetch and process Object's Model data
-                model = process_model_data(object, model_type, bones_dict, self.buffer_format, self.flip_axis, self.precision, self.logging)
-                if self.logging == True: model.log(self.buffer_format)
-                
-                # Modify file_path if necessary
-                model_file_path = file_path if len(object_list) == 1 else file_path + '_' + object.name.replace(':', '_')
-                
+                model = process_model_data(export_context, object, model_type, bones_dict)
+                # Modify filepath if necessary
+                model_filepath = filepath if len(object_list) == 1 else filepath + '_' + object.name.replace(':', '_')
                 # Write Model data to file
-                write_to_model_file(model_file_path, self.file_format, self.byte_order, model, self.buffer_format, self.logging)
-                if self.logging == True: print('Finished exporting %s...' % object.name)
+                write_to_model_file(export_context, model_filepath, model)
             print('MODEL EXPORT FINISHED')    
         
     except Error as e: 
@@ -815,12 +862,12 @@ class OpenGLExporter(Operator, ExportHelper):
     flip_axis: BoolProperty(
         name="Y-Axis as Up",
         description="Flips the axis so that the Y-Axis is pointing up.\nCurrently not available",
-        default=False,
+        default=True,
     )
     logging: BoolProperty(
         name="Log to console",
         description="Logs all data and calls to console",
-        default=True,
+        default=False,
     )
     
     # Includes Properties
@@ -916,9 +963,7 @@ class OpenGLExporter(Operator, ExportHelper):
         general_box_byte_order.prop(self, 'byte_order')
         general_box_byte_order.enabled = True if self.file_format == 'Binary' else False 
         general_box.prop(self, 'precision')
-        general_box_disabled = general_box.column()
-        general_box_disabled.prop(self, 'flip_axis')
-        general_box_disabled.enabled = True
+        general_box.prop(self, 'flip_axis')
         general_box.prop(self, 'logging')
         general_includes_box = general_box.box()
         general_includes_box.label(text='Includes:')
@@ -953,7 +998,25 @@ class OpenGLExporter(Operator, ExportHelper):
         anim_box.enabled = self.anim_bool
 
     def execute(self, context):
-        return execute_exporter(self, context)
+        export_context = ExportContext()
+        export_context.object_selection = self.selection
+        export_context.file_format = self.file_format
+        export_context.byte_order = self.byte_order
+        export_context.precision = self.precision
+        export_context.flip_axis = self.flip_axis
+        export_context.logging = self.logging
+        export_context.include_model = self.model_bool
+        export_context.include_armt = self.armt_bool
+        export_context.include_anim = self.anim_bool
+        export_context.model_buffer_format = self.buffer_format
+        export_context.include_uvs = self.uv_bool
+        export_context.include_normals = self.normals_bool
+        export_context.include_bones = self.rigging_bool if self.buffer_format == 'separate_buffers' else False
+        export_context.armt_matrix = self.armt_matrix
+        export_context.anim_time_format = self.anim_time_format
+        export_context.anim_export_frames = self.anim_export_frames
+        export_context.anim_frame_interval = self.anim_frame_interval
+        return execute_exporter(export_context, self.filepath.replace(self.filename_ext, ''))
         
     
 # Only needed if you want to add into a dynamic menu
