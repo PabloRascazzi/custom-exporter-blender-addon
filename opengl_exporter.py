@@ -10,7 +10,7 @@ bl_info = {
     "name": "OpenGL Exporter Add-on",
     "description": "Exports blender data in a more optimized format for OpenGL.",
     "author": "Pablo Rascazzi",
-    "version": (0, 7, 4),
+    "version": (0, 7, 5),
     "blender": (2, 92, 0),
     "location": "File > Export > OpenGL Exporter",
     "category": "Import-Export"
@@ -48,14 +48,18 @@ class OrderedEnum(Enum):
 
 
 class ModelType(OrderedEnum):
-    xyz            = 0
-    xyzuv          = 1
-    xyztbn         = 2
-    xyzuvtbn       = 3
-    xyzRigged      = 4
-    xyzuvRigged    = 5
-    xyztbnRigged   = 6
-    xyzuvtbnRigged = 7
+    xyz         = 0
+    xyzuv       = 1
+    xyzn        = 2
+    xyztbn      = 3
+    xyzuvn      = 4
+    xyzuvtbn    = 5
+    xyzrig      = 6
+    xyzuvrig    = 7
+    xyznrig     = 8
+    xyztbnrig   = 9
+    xyzuvnrig   = 10
+    xyzuvtbnrig = 11
 
 
 class ExportContext():
@@ -68,13 +72,14 @@ class ExportContext():
         self.flip_axis = None
         self.logging = None
         # Export Includes
-        self.include_model = None
+        self.include_mesh = None
         self.include_armt = None
         self.include_anim = None
         # Model Settings
-        self.model_buffer_format = None
+        self.mesh_buffer_format = None
         self.include_uvs = None
         self.include_normals = None
+        self.include_tangents = None
         self.include_bones = None
         # Armature Settings
         self.armt_matrix = None
@@ -93,13 +98,14 @@ class ExportContext():
         print(' > Convert to OpenGL Axis: %s' % (self.flip_axis))
         print(' > Logging: %s' % (self.logging))
         print(' > Export Includes:')
-        print(' == > Include Models: %s' % (self.include_model))
+        print(' == > Include Models: %s' % (self.include_mesh))
         print(' == > Include Armatures: %s' % (self.include_armt))
         print(' == > Include Animations: %s' % (self.include_anim))
         print(' > Model Settings:')
-        print(' == > Buffer Format: %s' % (self.model_buffer_format))
+        print(' == > Buffer Format: %s' % (self.mesh_buffer_format))
         print(' == > Include UV: %s' % (self.include_uvs))
         print(' == > Include Normals: %s' % (self.include_normals))
+        print(' == > Include Tangents: %s' % (self.include_tangents))
         print(' == > Include Bones: %s' % (self.include_bones))
         print(' > Armature Settings:')
         print(' == > Matrix Type: %s' % (self.armt_matrix))
@@ -110,13 +116,15 @@ class ExportContext():
         
 
 class Model():  
-    def __init__(self, type, vertex_stride, vertex_count, vertices, material_count, indices_list, uvs = None, normals = None, weight_indices = None, weights = None):
+    def __init__(self, type, vertex_stride, vertex_count, vertices, material_count, indices_list, uvs = None, normals = None, tangents = None, bitangents = None, weight_indices = None, weights = None):
         self.type = type
         self.vertex_stride = vertex_stride
         self.vertex_count = vertex_count
         self.vertices = vertices # vertices will store all the data if buffer_format is set to single_buffer
         self.uvs = uvs
         self.normals = normals
+        self.tangents = tangents
+        self.bitangents = bitangents
         self.weight_indices = weight_indices
         self.weights = weights
         self.material_count = material_count
@@ -130,6 +138,8 @@ class Model():
         if buffer_format == 'separate_buffers':
             print(' == == > UVs Array:', self.uvs)
             print(' == == > Normals Array:', self.normals)
+            print(' == == > Tangents Array:', self.tangents)
+            print(' == == > Bitangents Array:', self.bitangents)
             print(' == == > Weight Indices Array:', self.weight_indices)
             print(' == == > Weights Array:', self.weights)
         print(' == > Material Count: %d' % self.material_count)
@@ -347,16 +357,21 @@ def process_model_data(export_context, object, model_type, bones_dict):
     if 'uv' in model_type.name: 
         vertex_stride += 2
         uv_layer = mesh.uv_layers.active.data
-    if 'tbn' in model_type.name: 
+    if 'n' in model_type.name: 
         vertex_stride += 3
+        mesh.calc_normals()
+    if 'tbn' in model_type.name: 
+        vertex_stride += 6
         mesh.calc_tangents()
-    if 'Rigged' in model_type.name:
+    if 'rig' in model_type.name:
         vertex_stride += (bones_per_vertex*2)
     
     vert_dict = {}
     vertices = []
     uvs = []
     normals = []
+    tangents = []
+    bitangents = []
     weights = []
     weight_indices = []
     indices = [[]]
@@ -375,11 +390,18 @@ def process_model_data(export_context, object, model_type, bones_dict):
             if 'uv' in model_type.name:
                 vert.append(round(uv_layer[li].uv.x, export_context.precision))
                 vert.append(round(uv_layer[li].uv.y, export_context.precision))
-            if 'tbn' in model_type.name:
+            if 'n' in model_type.name:
                 normal = mathutils.Vector([loop[li].normal[0], loop[li].normal[1], loop[li].normal[2]])
                 if export_context.flip_axis == True: normal.rotate(conversion)
                 vert.extend([round(normal.x, export_context.precision), round(normal.y, export_context.precision), round(normal.z, export_context.precision)])
-            if 'Rigged' in model_type.name:
+            if 'tbn' in model_type.name:
+                tangent = mathutils.Vector([loop[li].tangent[0], loop[li].tangent[1], loop[li].tangent[2]])
+                if export_context.flip_axis == True: tangent.rotate(conversion)
+                vert.extend([round(tangent.x, export_context.precision), round(tangent.y, export_context.precision), round(tangent.z, export_context.precision)])
+                bitangent = mathutils.Vector([loop[li].bitangent[0], loop[li].bitangent[1], loop[li].bitangent[2]])
+                if export_context.flip_axis == True: bitangent.rotate(conversion)
+                vert.extend([round(bitangent.x, export_context.precision), round(bitangent.y, export_context.precision), round(bitangent.z, export_context.precision)])
+            if 'rig' in model_type.name:
                 vb = [] # vertex bones
                 for group in mesh.vertices[vi].groups:
                     vb.append([bones_dict[vertex_group[group.group].name].index, group.weight])
@@ -401,18 +423,23 @@ def process_model_data(export_context, object, model_type, bones_dict):
             if vert_key not in vert_dict:
                 vert_dict[vert_key] = next_index
                 
-                if export_context.model_buffer_format == 'single_buffer':
+                if export_context.mesh_buffer_format == 'single_buffer':
                     vertices.extend(vert)
-                elif export_context.model_buffer_format == 'separate_buffers':
+                elif export_context.mesh_buffer_format == 'separate_buffers':
                     vertices.extend(vert[0:3])
                     next_vert_index = 3
                     if 'uv' in model_type.name:
                         uvs.extend(vert[next_vert_index:next_vert_index+2])
                         next_vert_index += 2
-                    if 'tbn' in model_type.name:
+                    if 'n' in model_type.name:
                         normals.extend(vert[next_vert_index:next_vert_index+3])
                         next_vert_index += 3
-                    if 'Rigged' in model_type.name:
+                    if 'tbn' in model_type.name:
+                        tangents.extend(vert[next_vert_index:next_vert_index+3])
+                        next_vert_index += 3
+                        bitangents.extend(vert[next_vert_index:next_vert_index+3])
+                        next_vert_index += 3
+                    if 'rig' in model_type.name:
                         weights.extend(vert[next_vert_index:next_vert_index+bones_per_vertex])
                         next_vert_index += bones_per_vertex
                         weight_indices.extend(vert[next_vert_index:next_vert_index+bones_per_vertex])
@@ -444,13 +471,13 @@ def process_model_data(export_context, object, model_type, bones_dict):
                     indices[face.material_index].append(tmp_indices[0])
                     indices[face.material_index].append(tmp_indices[i])
 
-    if export_context.model_buffer_format == 'single_buffer':
+    if export_context.mesh_buffer_format == 'single_buffer':
         new_model = Model(model_type, vertex_stride, len(vert_dict), vertices, len(indices), indices)
-    elif export_context.model_buffer_format == 'separate_buffers':
-        new_model = Model(model_type, vertex_stride, len(vert_dict), vertices, len(indices), indices, uvs, normals, weights, weight_indices)
+    elif export_context.mesh_buffer_format == 'separate_buffers':
+        new_model = Model(model_type, vertex_stride, len(vert_dict), vertices, len(indices), indices, uvs, normals, tangents, bitangents, weights, weight_indices)
     else: raise Error('Invalid vertex buffer format.')
     
-    if export_context.logging == True: new_model.log(export_context.model_buffer_format)
+    if export_context.logging == True: new_model.log(export_context.mesh_buffer_format)
     return new_model
 
 
@@ -581,7 +608,7 @@ def write_to_armature_file(export_context, file_path, bones_dict):
     
 
 def write_to_model_file(export_context, file_path, model):
-    file_path = file_path + ".model"
+    file_path = file_path + ".mesh"
     if export_context.logging == True: print('File save location: %s' % file_path)
     
     if export_context.file_format == 'Binary':
@@ -598,11 +625,11 @@ def write_to_model_file(export_context, file_path, model):
         f.write(model.type.value.to_bytes(4, export_context.byte_order, signed=True))
         f.write(model.vertex_stride.to_bytes(4, export_context.byte_order, signed=True))
         f.write(model.vertex_count.to_bytes(4, export_context.byte_order, signed=True))
-        if export_context.model_buffer_format == 'single_buffer':
+        if export_context.mesh_buffer_format == 'single_buffer':
             vertices_byte_array = numpy.array(model.vertices, 'float32')
             if swap_bytes == True: vertices_byte_array.byteswap()
             vertices_byte_array.tofile(f)
-        elif export_context.model_buffer_format == 'separate_buffers':
+        elif export_context.mesh_buffer_format == 'separate_buffers':
             vertices_byte_array = numpy.array(model.vertices, 'float32')
             if swap_bytes == True: vertices_byte_array.byteswap()
             vertices_byte_array.tofile(f)
@@ -610,11 +637,18 @@ def write_to_model_file(export_context, file_path, model):
                 uvs_byte_array = numpy.array(model.uvs, 'float32')
                 if swap_bytes == True: uvs_byte_array.byteswap()
                 uvs_byte_array.tofile(f)
-            if 'tbn' in model.type.name:
+            if 'n' in model.type.name:
                 normals_byte_array = numpy.array(model.normals, 'float32')
                 if swap_bytes == True: normals_byte_array.byteswap()
                 normals_byte_array.tofile(f)
-            if 'Rigged' in model.type.name:
+            if 'tbn' in model.type.name:
+                tangents_byte_array = numpy.array(model.tangents, 'float32')
+                if swap_bytes == True: tangents_byte_array.byteswap()
+                tangents_byte_array.tofile(f)
+                bitangents_byte_array = numpy.array(model.bitangents, 'float32')
+                if swap_bytes == True: bitangents_byte_array.byteswap()
+                bitangents_byte_array.tofile(f)
+            if 'rig' in model.type.name:
                 weight_indices_byte_array = numpy.array(model.weight_indices, 'int_')
                 if swap_bytes == True: weight_indices_byte_array.byteswap()
                 weight_indices_byte_array.tofile(f)
@@ -638,23 +672,30 @@ def write_to_model_file(export_context, file_path, model):
         f.write('mtyp %d\n' % model.type.value)
         f.write('vstr %d\n' % model.vertex_stride)
         f.write('vcnt %d\n' % model.vertex_count)
-        if export_context.model_buffer_format == 'single_buffer':
+        if export_context.mesh_buffer_format == 'single_buffer':
             f.write('varr')
             for vert in model.vertices: f.write(' %f' % vert)
             f.write('\n')
-        elif export_context.model_buffer_format == 'separate_buffers':
+        elif export_context.mesh_buffer_format == 'separate_buffers':
             f.write('varr')
             for vert in model.vertices: f.write(' %f' % vert)
             f.write('\n')
             if 'uv' in model.type.name:
-                f.write('tarr')
+                f.write('uarr')
                 for uv in model.uvs: f.write(' %f' % uv)
                 f.write('\n')
-            if 'tbn' in model.type.name:
+            if 'n' in model.type.name:
                 f.write('narr')
                 for normal in model.normals: f.write(' %f' % normal)
                 f.write('\n')
-            if 'Rigged' in model.type.name:
+            if 'tbn' in model.type.name:
+                f.write('tarr')
+                for tangent in model.tangents: f.write(' %f' % tangent)
+                f.write('\n')
+                f.write('barr')
+                for bitangent in model.bitangents: f.write(' %f' % bitangent)
+                f.write('\n')
+            if 'rig' in model.type.name:
                 f.write('wiar')
                 for weight_index in model.weight_indices: f.write(' %d' % weight_index)
                 f.write('\n')
@@ -727,17 +768,25 @@ def get_model_type(export_context):
     type = None
     if export_context.include_uvs == True:
         if export_context.include_normals == True:
-            if export_context.include_bones == True: type = ModelType.xyzuvtbnRigged
-            else: type = ModelType.xyzuvtbn
+            if export_context.include_tangents == True: 
+                if export_context.include_bones == True: type = ModelType.xyzuvtbnrig
+                else: type = ModelType.xyzuvtbn
+            else: 
+                if export_context.include_bones == True: type = ModelType.xyzuvnrig
+                else: type = ModelType.xyzuvn
         else:
-            if export_context.include_bones == True: type = ModelType.xyzuvRigged
+            if export_context.include_bones == True: type = ModelType.xyzuvrig
             else: type = ModelType.xyzuv
     else:
         if export_context.include_normals == True:
-            if export_context.include_bones == True: type = ModelType.xyztbnRigged
-            else: type = ModelType.xyztbn
+            if export_context.include_tangents == True:
+                if export_context.include_bones == True: type = ModelType.xyztbnrig
+                else: type = ModelType.xyztbn
+            else:
+                if export_context.include_bones == True: type = ModelType.xyznrig
+                else: type = ModelType.xyzn
         else:
-            if export_context.include_bones == True: type = ModelType.xyzRigged
+            if export_context.include_bones == True: type = ModelType.xyzrig
             else: type = ModelType.xyz
             
     if export_context.logging == True: print(' > Model Type: %s' % type.name)
@@ -756,14 +805,14 @@ def execute_exporter(export_context, filepath):
         # Set mode to Object
         bpy.ops.object.mode_set(mode='OBJECT')
         
-        if export_context.include_model == False and export_context.include_armt == False and export_context.include_anim == False:
+        if export_context.include_mesh == False and export_context.include_armt == False and export_context.include_anim == False:
             raise Error('Nothing to export. Select object to export in the "Includes" box.')
         
         # Fetch all the objects to export
         object_list, armature_list = make_objects_list(export_context)
         
         # Find ModelType to export
-        if export_context.include_model == True:
+        if export_context.include_mesh == True:
             model_type = get_model_type(export_context)
             
         # Process all Armature data for use in processing other data
@@ -786,7 +835,7 @@ def execute_exporter(export_context, filepath):
             print('ANIMATION EXPORT FINISHED')
            
         # Process and export all model data 
-        if export_context.include_model == True:
+        if export_context.include_mesh == True:
             for object in object_list:
                 # Fetch Object's Armature data (aka. bones_dict) for current object
                 bones_dict = None
@@ -871,9 +920,9 @@ class OpenGLExporter(Operator, ExportHelper):
     )
     
     # Includes Properties
-    model_bool: BoolProperty(
-        name="Model",
-        description="Writes model data and exports it in .model file",
+    mesh_bool: BoolProperty(
+        name="Mesh",
+        description="Writes mesh data and exports it in .mesh file",
         default=True,
     )
     armt_bool: BoolProperty(
@@ -905,6 +954,11 @@ class OpenGLExporter(Operator, ExportHelper):
     normals_bool: BoolProperty(
         name="Normals",
         description="Writes normal data in vertex buffer",
+        default=True,
+    )
+    tangents_bool: BoolProperty(
+        name="Tangents",
+        description="Writes tangent and bitangent data in vertex buffer",
         default=True,
     )
     rigging_bool: BoolProperty(
@@ -967,21 +1021,24 @@ class OpenGLExporter(Operator, ExportHelper):
         general_box.prop(self, 'logging')
         general_includes_box = general_box.box()
         general_includes_box.label(text='Includes:')
-        general_includes_box.prop(self, 'model_bool')
+        general_includes_box.prop(self, 'mesh_bool')
         general_includes_box.prop(self, 'armt_bool')
         general_includes_box.prop(self, 'anim_bool')
         
-        model_box = layout.box()
-        model_box.label(text='Model Settings:')
-        model_box.prop(self, 'buffer_format')
-        model_includes_box = model_box.box()
-        model_includes_box.label(text='Includes:')
-        model_includes_box.prop(self, 'uv_bool')
-        model_includes_box.prop(self, 'normals_bool')
-        model_includes_box_rigging = model_includes_box.column()
-        model_includes_box_rigging.prop(self, 'rigging_bool')
-        model_includes_box_rigging.enabled = True if self.buffer_format == 'separate_buffers' else False 
-        model_box.enabled = self.model_bool
+        mesh_box = layout.box()
+        mesh_box.label(text='Mesh Settings:')
+        mesh_box.prop(self, 'buffer_format')
+        mesh_includes_box = mesh_box.box()
+        mesh_includes_box.label(text='Includes:')
+        mesh_includes_box.prop(self, 'uv_bool')
+        mesh_includes_box.prop(self, 'normals_bool')
+        mesh_includes_box_tangent = mesh_includes_box.column()
+        mesh_includes_box_tangent.prop(self, 'tangents_bool')
+        mesh_includes_box_tangent.enabled = True if self.normals_bool == True else False
+        mesh_includes_box_rigging = mesh_includes_box.column()
+        mesh_includes_box_rigging.prop(self, 'rigging_bool')
+        mesh_includes_box_rigging.enabled = True if self.buffer_format == 'separate_buffers' else False 
+        mesh_box.enabled = self.mesh_bool
         
         armt_box = layout.box()
         armt_box.label(text='Armature Settings:')
@@ -1005,12 +1062,13 @@ class OpenGLExporter(Operator, ExportHelper):
         export_context.precision = self.precision
         export_context.flip_axis = self.flip_axis
         export_context.logging = self.logging
-        export_context.include_model = self.model_bool
+        export_context.include_mesh = self.mesh_bool
         export_context.include_armt = self.armt_bool
         export_context.include_anim = self.anim_bool
-        export_context.model_buffer_format = self.buffer_format
+        export_context.mesh_buffer_format = self.buffer_format
         export_context.include_uvs = self.uv_bool
         export_context.include_normals = self.normals_bool
+        export_context.include_tangents = self.tangents_bool if self.normals_bool == True else False
         export_context.include_bones = self.rigging_bool if self.buffer_format == 'separate_buffers' else False
         export_context.armt_matrix = self.armt_matrix
         export_context.anim_time_format = self.anim_time_format
